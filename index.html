@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dynamic Halftone Pastel Dot Density Map</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; }
+  canvas { display: block; }
+  #loading {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: #888; font: 14px monospace;
+  }
+</style>
+</head>
+<body>
+<div id="loading">Loading world data...</div>
+<canvas id="main"></canvas>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
+<script>
+(async function() {
+  // --- Config ---
+  const DOT_RADIUS = 3.5;
+  const GRID_STEP = 10;
+  const BG_COLOR = "#000000";
+  const NOISE_STRENGTH = 0.28; // how much spatial noise shifts each dot's weight
+
+  // ========================================================
+  // Simplex-style 2D noise (fast hash-based, no library)
+  // ========================================================
+  const PERM = new Uint8Array(512);
+  (function seedPerm() {
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) {
+      const j = (Math.imul(i, 0x9E3779B9) >>> 0) % (i + 1);
+      [p[i], p[j]] = [p[j], p[i]];
+    }
+    for (let i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  })();
+
+  const GRAD = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+
+  function dot2(g, x, y) { return g[0]*x + g[1]*y; }
+
+  // Value noise that returns -1..1, smooth and tileable-feeling
+  function noise2D(x, y) {
+    const X = Math.floor(x) & 255;
+    const Y = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = xf * xf * (3 - 2 * xf);
+    const v = yf * yf * (3 - 2 * yf);
+    const aa = PERM[PERM[X] + Y];
+    const ab = PERM[PERM[X] + Y + 1];
+    const ba = PERM[PERM[X + 1] + Y];
+    const bb = PERM[PERM[X + 1] + Y + 1];
+    const g1 = dot2(GRAD[aa & 7], xf, yf);
+    const g2 = dot2(GRAD[ba & 7], xf - 1, yf);
+    const g3 = dot2(GRAD[ab & 7], xf, yf - 1);
+    const g4 = dot2(GRAD[bb & 7], xf - 1, yf - 1);
+    const x1 = g1 + u * (g2 - g1);
+    const x2 = g3 + u * (g4 - g3);
+    return x1 + v * (x2 - x1);
+  }
+
+  // Fractal Brownian Motion — layered noise for organic variation
+  function fbm(x, y) {
+    let val = 0, amp = 0.5, freq = 1;
+    for (let i = 0; i < 4; i++) {
+      val += amp * noise2D(x * freq, y * freq);
+      amp *= 0.5;
+      freq *= 2.0;
+    }
+    return val; // roughly -1..1
+  }
+
+  // --- Setup canvases ---
+  const mainCanvas = document.getElementById("main");
+  const mainCtx = mainCanvas.getContext("2d");
+  const offCanvas = document.createElement("canvas");
+  const offCtx = offCanvas.getContext("2d");
+
+  let W, H;
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    mainCanvas.width = W;
+    mainCanvas.height = H;
+    offCanvas.width = W;
+    offCanvas.height = H;
+  }
+  resize();
+
+  // --- Population density (people/km²) by ISO numeric code ---
+  const densityByCode = {
+    "4":60,"8":105,"12":18,"20":164,"24":26,"28":220,"32":17,"36":3,
+    "40":109,"44":39,"48":2239,"50":1265,"51":104,"52":660,"56":383,
+    "64":20,"68":11,"70":64,"72":4,"76":25,"84":17,"90":16,"96":83,
+    "100":64,"104":83,"108":463,"112":47,"116":95,"120":56,"124":4,
+    "132":267,"140":8,"144":341,"148":13,"152":26,"156":153,"158":673,
+    "170":46,"174":467,"178":16,"180":40,"184":135,"188":100,"191":73,
+    "192":110,"196":131,"203":139,"204":105,"208":137,"212":100,
+    "214":225,"218":71,"222":313,"226":54,"231":115,"232":35,
+    "233":31,"748":67,"242":49,"246":18,"250":119,"258":4,
+    "262":42,"266":9,"268":57,"270":230,"276":240,"288":137,"296":152,
+    "300":81,"308":328,"316":320,"320":167,"324":53,"328":4,"332":413,
+    "340":89,"344":7140,"348":107,"352":4,"356":464,"360":151,
+    "364":52,"368":93,"372":72,"376":400,"380":206,"384":83,
+    "388":272,"392":347,"398":7,"400":115,"404":94,"408":214,
+    "410":527,"414":240,"417":34,"418":31,"422":594,"426":73,
+    "428":30,"430":53,"434":4,"438":242,"440":43,"442":250,
+    "446":21645,"450":48,"454":203,"458":99,"462":1802,"466":17,
+    "470":1380,"478":4,"480":626,"484":66,"492":253,"496":2,
+    "498":121,"499":47,"504":83,"508":40,"512":16,"516":3,
+    "520":569,"524":203,"528":508,"540":16,"548":22,"554":19,
+    "558":55,"562":25,"566":226,"578":15,"586":287,"591":56,
+    "598":21,"600":18,"604":26,"608":376,"616":124,"620":112,
+    "624":75,"626":87,"630":360,"634":248,"642":84,"643":9,
+    "646":525,"659":212,"662":301,"670":215,"682":16,"686":87,
+    "688":78,"690":222,"694":110,"702":8358,"703":114,"704":314,
+    "705":104,"706":25,"710":49,"716":38,"724":94,
+    "740":4,"752":25,"756":219,"760":118,"762":68,"764":137,
+    "768":152,"776":153,"780":272,"784":145,"788":76,"792":110,
+    "795":50,"800":229,"804":77,"818":103,"826":281,"834":67,
+    "840":36,"858":20,"860":79,"862":32,"882":70,"887":56,
+    "894":24
+  };
+
+  // --- Load world TopoJSON ---
+  const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+  document.getElementById("loading").remove();
+
+  const countries = topojson.feature(world, world.objects.countries);
+  countries.features.forEach(f => {
+    f.properties.density = densityByCode[f.id] || 0;
+  });
+  const geojson = countries;
+
+  // --- Density → grayscale (log scale) ---
+  const densities = geojson.features.map(f => f.properties.density).filter(d => d > 0);
+  const densityToGray = d3.scaleLog()
+    .domain([Math.max(1, d3.min(densities)), d3.max(densities)])
+    .range([20, 255])
+    .clamp(true);
+
+  const grayToWeight = d3.scaleLinear()
+    .domain([20, 255]).range([0, 1]).clamp(true);
+
+  // ========================================================
+  // HIGH-CONTRAST CONTINUOUS PASTEL SCALE (9 stops, HSL interp)
+  //
+  //   Low density  → deep darks that vanish into background
+  //   High density → electric neon pastels / soft white glow
+  // ========================================================
+  const pastelScale = (() => {
+    const stops =   [0.00,    0.12,    0.24,    0.36,    0.48,    0.60,    0.72,    0.85,    1.00];
+    const colors = [
+      "#1A1525", // near-black faint purple
+      "#2B1F3D", // dark navy-purple
+      "#4A2D6B", // deep plum
+      "#7B4F9A", // rich violet
+      "#C47DBF", // orchid-magenta
+      "#FF8EC4", // neon pink
+      "#E0A0FF", // electric lavender
+      "#7EE8FC", // electric cyan-blue
+      "#F2EDFF", // soft white glow
+    ];
+    // Use d3.interpolateHsl for smooth hue rotation through the spectrum
+    return d3.scaleLinear()
+      .domain(stops)
+      .range(colors)
+      .interpolate(d3.interpolateHsl);
+  })();
+
+  // --- Projection ---
+  const projection = d3.geoNaturalEarth1().fitSize(
+    [W * 0.92, H * 0.92], geojson
+  );
+  const [tx, ty] = projection.translate();
+  projection.translate([tx + W * 0.04, ty + H * 0.04]);
+
+  const baseTranslate = projection.translate();
+  const baseScale = projection.scale();
+
+  // --- Zoom ---
+  let currentTransform = d3.zoomIdentity;
+  const zoom = d3.zoom()
+    .scaleExtent([0.5, 30])
+    .on("zoom", (event) => {
+      currentTransform = event.transform;
+      requestRender();
+    });
+  d3.select(mainCanvas).call(zoom);
+
+  // --- Hex grid ---
+  function generateHexGrid(w, h, step) {
+    const points = [];
+    const rowH = step * Math.sqrt(3) / 2;
+    let row = 0;
+    for (let y = 0; y < h; y += rowH) {
+      const offsetX = (row & 1) ? step / 2 : 0;
+      for (let x = offsetX; x < w; x += step) {
+        points.push(x, y); // flat array for speed
+      }
+      row++;
+    }
+    return new Float32Array(points);
+  }
+
+  let hexGrid = generateHexGrid(W, H, GRID_STEP);
+
+  window.addEventListener("resize", () => {
+    resize();
+    hexGrid = generateHexGrid(W, H, GRID_STEP);
+    requestRender();
+  });
+
+  // --- Throttled render ---
+  let renderPending = false;
+  function requestRender() {
+    if (!renderPending) {
+      renderPending = true;
+      requestAnimationFrame(() => { renderPending = false; render(); });
+    }
+  }
+
+  // --- Pre-compute color LUT (256 entries x noise range) ---
+  // For each gray value (0-255) we build a base weight.
+  // At render time we offset this weight by noise and look up color.
+  // Pre-bake 1024 colors across the full weight range for speed.
+  const COLOR_LUT_SIZE = 1024;
+  const colorLUT = new Array(COLOR_LUT_SIZE);
+  for (let i = 0; i < COLOR_LUT_SIZE; i++) {
+    colorLUT[i] = pastelScale(i / (COLOR_LUT_SIZE - 1));
+  }
+
+  // --- Legend config ---
+  const LEGEND = {
+    x: 24,               // left padding
+    y: 24,               // top padding
+    barWidth: 14,         // slim vertical bar
+    barHeight: 200,       // gradient strip height
+    panelPadX: 16,        // inner horizontal padding
+    panelPadY: 14,        // inner vertical padding
+    tickCount: 5,         // number of intermediate tick labels
+    fontFamily: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif",
+  };
+
+  // Pre-compute density tick values (log-spaced)
+  const minD = d3.min(densities);
+  const maxD = d3.max(densities);
+  const legendTicks = (() => {
+    const logMin = Math.log10(Math.max(1, minD));
+    const logMax = Math.log10(maxD);
+    const ticks = [];
+    for (let i = 0; i <= LEGEND.tickCount; i++) {
+      const t = i / LEGEND.tickCount;
+      const val = Math.pow(10, logMin + t * (logMax - logMin));
+      ticks.push({ t, val });
+    }
+    return ticks;
+  })();
+
+  // Pre-render gradient strip to an offscreen canvas (never changes)
+  const legendBarCanvas = document.createElement("canvas");
+  legendBarCanvas.width = LEGEND.barWidth;
+  legendBarCanvas.height = LEGEND.barHeight;
+  const legendBarCtx = legendBarCanvas.getContext("2d");
+  for (let py = 0; py < LEGEND.barHeight; py++) {
+    const t = 1 - py / (LEGEND.barHeight - 1); // top = high, bottom = low
+    const lutIdx = ~~(t * (COLOR_LUT_SIZE - 1));
+    legendBarCtx.fillStyle = colorLUT[lutIdx];
+    legendBarCtx.fillRect(0, py, LEGEND.barWidth, 1);
+  }
+
+  function formatDensity(v) {
+    if (v >= 10000) return d3.format(",.0f")(v);
+    if (v >= 1000)  return d3.format(",.0f")(v);
+    if (v >= 100)   return d3.format(".0f")(v);
+    if (v >= 10)    return d3.format(".0f")(v);
+    return d3.format(".1f")(v);
+  }
+
+  function drawLegend(ctx) {
+    const L = LEGEND;
+    const tickLabelWidth = 62;
+    const titleHeight = 22;
+    const subtitleHeight = 14;
+    const headerBlock = titleHeight + subtitleHeight + 8;
+    const panelW = L.panelPadX + L.barWidth + 10 + tickLabelWidth + L.panelPadX;
+    const panelH = L.panelPadY + headerBlock + L.barHeight + 20 + L.panelPadY;
+
+    ctx.save();
+
+    // --- Panel background (rounded rect, semi-transparent) ---
+    const r = 10;
+    const px = L.x, py = L.y;
+    ctx.beginPath();
+    ctx.moveTo(px + r, py);
+    ctx.lineTo(px + panelW - r, py);
+    ctx.quadraticCurveTo(px + panelW, py, px + panelW, py + r);
+    ctx.lineTo(px + panelW, py + panelH - r);
+    ctx.quadraticCurveTo(px + panelW, py + panelH, px + panelW - r, py + panelH);
+    ctx.lineTo(px + r, py + panelH);
+    ctx.quadraticCurveTo(px, py + panelH, px, py + panelH - r);
+    ctx.lineTo(px, py + r);
+    ctx.quadraticCurveTo(px, py, px + r, py);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(12, 10, 20, 0.75)";
+    ctx.fill();
+    // Subtle border
+    ctx.strokeStyle = "rgba(180, 160, 220, 0.15)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // --- Title ---
+    const textX = px + L.panelPadX;
+    let textY = py + L.panelPadY + 2;
+
+    ctx.fillStyle = "rgba(225, 215, 245, 0.95)";
+    ctx.font = `600 13px ${L.fontFamily}`;
+    ctx.textBaseline = "top";
+    ctx.fillText("Population Density", textX, textY);
+    textY += titleHeight;
+
+    ctx.fillStyle = "rgba(160, 145, 190, 0.7)";
+    ctx.font = `400 10px ${L.fontFamily}`;
+    ctx.fillText("people / km\u00B2", textX, textY);
+    textY += subtitleHeight + 8;
+
+    // --- Gradient bar ---
+    const barX = textX;
+    const barY = textY;
+
+    // Outer glow behind bar
+    ctx.shadowColor = "rgba(160, 100, 255, 0.15)";
+    ctx.shadowBlur = 12;
+    ctx.drawImage(legendBarCanvas, barX, barY);
+    ctx.shadowBlur = 0;
+
+    // Thin rounded border around bar
+    const br = 3;
+    ctx.beginPath();
+    ctx.moveTo(barX + br, barY);
+    ctx.lineTo(barX + L.barWidth - br, barY);
+    ctx.quadraticCurveTo(barX + L.barWidth, barY, barX + L.barWidth, barY + br);
+    ctx.lineTo(barX + L.barWidth, barY + L.barHeight - br);
+    ctx.quadraticCurveTo(barX + L.barWidth, barY + L.barHeight, barX + L.barWidth - br, barY + L.barHeight);
+    ctx.lineTo(barX + br, barY + L.barHeight);
+    ctx.quadraticCurveTo(barX, barY + L.barHeight, barX, barY + L.barHeight - br);
+    ctx.lineTo(barX, barY + br);
+    ctx.quadraticCurveTo(barX, barY, barX + br, barY);
+    ctx.closePath();
+    ctx.strokeStyle = "rgba(200, 180, 240, 0.2)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+
+    // --- Tick labels alongside bar ---
+    const labelX = barX + L.barWidth + 10;
+    ctx.font = `400 10px ${L.fontFamily}`;
+    ctx.textBaseline = "middle";
+
+    for (let i = 0; i < legendTicks.length; i++) {
+      const tick = legendTicks[i];
+      const ty = barY + L.barHeight * (1 - tick.t); // t=0 at bottom, t=1 at top
+      const label = formatDensity(tick.val);
+
+      // Tiny tick line
+      ctx.strokeStyle = "rgba(180, 160, 220, 0.3)";
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(barX + L.barWidth + 2, ty);
+      ctx.lineTo(barX + L.barWidth + 6, ty);
+      ctx.stroke();
+
+      // Value label
+      ctx.fillStyle = "rgba(200, 190, 225, 0.85)";
+      ctx.fillText(label, labelX, ty);
+    }
+
+    // --- "Low" / "High" endpoint labels ---
+    ctx.font = `500 9px ${L.fontFamily}`;
+    ctx.fillStyle = "rgba(140, 125, 175, 0.6)";
+    ctx.textBaseline = "top";
+    ctx.fillText("Low", barX, barY + L.barHeight + 6);
+    ctx.textBaseline = "bottom";
+    ctx.fillText("High", barX, barY - 4);
+
+    ctx.restore();
+  }
+
+  function render() {
+    const w = W, h = H;
+
+    // --- Offscreen: draw polygons with grayscale density ---
+    offCtx.clearRect(0, 0, w, h);
+
+    const zoomedProjection = d3.geoNaturalEarth1()
+      .translate([
+        currentTransform.x + baseTranslate[0] * currentTransform.k,
+        currentTransform.y + baseTranslate[1] * currentTransform.k
+      ])
+      .scale(baseScale * currentTransform.k);
+
+    const zoomedPath = d3.geoPath().projection(zoomedProjection).context(offCtx);
+
+    for (let fi = 0; fi < geojson.features.length; fi++) {
+      const feature = geojson.features[fi];
+      const density = feature.properties.density;
+      if (density > 0) {
+        const gray = Math.round(densityToGray(density));
+        offCtx.fillStyle = `rgb(${gray},${gray},${gray})`;
+        offCtx.beginPath();
+        zoomedPath(feature);
+        offCtx.fill();
+      }
+    }
+
+    // --- Read all pixels ---
+    const pixels = offCtx.getImageData(0, 0, w, h).data;
+
+    // --- Main canvas: clear ---
+    mainCtx.fillStyle = BG_COLOR;
+    mainCtx.fillRect(0, 0, w, h);
+
+    // Noise frequency — controls spatial "grain" of color variation.
+    // Tied to screen space so it stays consistent across zoom levels.
+    const noiseFreq = 0.07;
+    const TAU = Math.PI * 2;
+    const lutMax = COLOR_LUT_SIZE - 1;
+
+    // --- Draw dots ---
+    for (let i = 0; i < hexGrid.length; i += 2) {
+      const x = hexGrid[i];
+      const y = hexGrid[i + 1];
+      const px = ~~x;  // fast Math.floor
+      const py = ~~y;
+      if (px < 0 || px >= w || py < 0 || py >= h) continue;
+
+      const gray = pixels[(py * w + px) << 2]; // R channel
+      if (gray === 0) continue;
+
+      // Base weight from density
+      const baseWeight = (gray - 20) / 235; // maps 20..255 → 0..1
+
+      // Spatial noise at this screen position — shifts weight per-dot
+      const n = fbm(x * noiseFreq, y * noiseFreq) * NOISE_STRENGTH;
+
+      // Clamp final weight to [0, 1]
+      let w01 = baseWeight + n;
+      if (w01 < 0) w01 = 0;
+      else if (w01 > 1) w01 = 1;
+
+      // Look up pre-baked color
+      const lutIdx = ~~(w01 * lutMax);
+      mainCtx.fillStyle = colorLUT[lutIdx];
+      mainCtx.beginPath();
+      mainCtx.arc(x, y, DOT_RADIUS, 0, TAU);
+      mainCtx.fill();
+    }
+
+    // --- Legend overlay (drawn last, always on top) ---
+    drawLegend(mainCtx);
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

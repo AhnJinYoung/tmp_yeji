@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python preprocess.py)",
+      "Bash(pip install geopandas)",
+      "Bash(python -m pip install geopandas)"
+    ]
+  }
+}
